@@ -1,29 +1,45 @@
-
 let request = require('request');
 let prompt = require('prompt');
+let cookieJar = require('./cookieJar');
 let { username, password } = require('./credentials');
 
-let jar = request.jar();
-let csrf_regexp = /globals.csrf='([a-f0-9-]+)'/;
+let deviceName = 'moneyApp';
+let csrfRegexp = /globals.csrf='([a-f0-9-]+)'/;
+let loggedInCsrfRegexp = /var csrf = '([a-f0-9-]+)'/;
 
-function getHomepageCSRF() {
+function getHomepageCSRF(jar) {
   let requestOptions = {
     method: 'GET',
-    url: 'https://home.personalcapital.com/page/login/goHome',
+    url: 'https://home.personalcapital.com',
     jar,
   };
 
   return new Promise((resolve, reject) => {
     request(requestOptions, (error, response, body) => {
-      let result = csrf_regexp.exec(body);
+      let result = csrfRegexp.exec(body);
+
+      if (result == null) {
+        result = loggedInCsrfRegexp.exec(body);
+        let csrf = result[1];
+        reject({
+          csrf,
+          jar,
+        });
+        return;
+      }
+
       let csrf = result[1];
-      console.log(csrf);
-      resolve(csrf);
+      resolve({
+        csrf,
+        jar,
+      });
     });
   }); 
 }
 
-function identifyUser(csrf) {
+function identifyUser(session) {
+  let { csrf, jar } = session;
+
   let data = {
     username,
     csrf,
@@ -44,18 +60,18 @@ function identifyUser(csrf) {
 
   return new Promise((resolve, reject) => {
     request(requestOptions, (error, response, body) => {
-      if (body.status_code == 200) {
-        reject();
-      } else {
-        let newCsrf = JSON.parse(body).spHeader.csrf;
-        console.log(newCsrf);
-        resolve(newCsrf);
-      }
+      let newCsrf = JSON.parse(body).spHeader.csrf;
+      resolve({
+        csrf: newCsrf,
+        jar,
+      });
     });
   });
 }
 
-function smsChallenge(csrf) {
+function smsChallenge(session) {
+  let { csrf, jar } = session;
+
   let data = {
     challengeReason: 'DEVICE_AUTH',
     challengeMethod: 'OP',
@@ -74,16 +90,14 @@ function smsChallenge(csrf) {
 
   return new Promise((resolve, reject) => {
     request(requestOptions, (error, response, body) => {
-      if (body.status_code == 200) {
-        reject();
-      } else {      
-        resolve(csrf);
-      }
+      resolve(session);
     });
   });
 }
 
-function promptSmsCode(csrf) {
+function promptSmsCode(session) {
+  let { csrf, jar } = session;
+  
   prompt.start();
   return new Promise((resolve, reject) => {
     prompt.get([{
@@ -91,6 +105,7 @@ function promptSmsCode(csrf) {
       type: 'number',
     }], (err, result) => {
       resolve({
+        jar,
         code: result.code,
         csrf,
       });
@@ -98,8 +113,8 @@ function promptSmsCode(csrf) {
   });
 }
 
-function smsAuthenticate(values) {
-  let { csrf, code } = values;
+function smsAuthenticate(session) {
+  let { csrf, jar, code } = session;
 
   let data = {
     challengeReason: 'DEVICE_AUTH',
@@ -119,16 +134,17 @@ function smsAuthenticate(values) {
 
   return new Promise((resolve, reject) => {
     request(requestOptions, (error, response, body) => {
-      if (body.status_code == 200) {
-        reject();
-      } else {      
-        resolve(csrf);
-      }
+      resolve({
+        csrf,
+        jar,
+      });
     });
   });
 }
 
-function authenticatePassword(csrf) {
+function authenticatePassword(session) {
+  let { csrf, jar } = session;
+
   let data = {
     bindDevice: true,
     deviceName: '',
@@ -150,47 +166,30 @@ function authenticatePassword(csrf) {
 
   return new Promise((resolve, reject) => {
     request(requestOptions, (error, response, body) => {
-      if (body.status_code == 200) {
-        reject();
-      } else {      
-        resolve(csrf);
-      }
+      resolve({
+        csrf,
+        jar
+      });
     });
   });
 }
 
-function getUserTransactions(csrf) {
-  let data = {
-    lastServerChangeId: -1,
-    csrf,
-    apiClient: 'WEB'
-  };
-  
-  let requestOptions = {
-    method: 'POST',
-    url: 'https://home.personalcapital.com/api/transaction/getUserTransactions',
-    form: data,
-    jar,
-  };
-
-  return new Promise((resolve, reject) => {
-    request(requestOptions, (error, response, body) => {
-      if (body.status_code == 200) {
-        reject();
-      } else {
-        JSON.parse(body).spData.transactions.forEach(transaction => {
-          console.log(transaction.description);
-        }); 
-        resolve();
-      }
+function login() {
+  return cookieJar.getJar()
+    .then(getHomepageCSRF)
+    .then(identifyUser)
+    .then(smsChallenge)
+    .then(promptSmsCode)
+    .then(smsAuthenticate)
+    .then(authenticatePassword)
+    .then(session => {
+      console.log('logged in successfully');
+      return session;
+    })
+    .catch(session => {
+      console.log('logged in successfully using stored session');
+      return Promise.resolve(session)
     });
-  }); 
 }
 
-getHomepageCSRF()
-  .then(identifyUser)
-  .then(smsChallenge)
-  .then(promptSmsCode)
-  .then(smsAuthenticate)
-  .then(authenticatePassword)
-  .then(getUserTransactions);
+module.exports = login;
